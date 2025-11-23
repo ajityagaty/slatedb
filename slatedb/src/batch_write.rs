@@ -189,6 +189,17 @@ impl DbInner {
             self.maybe_freeze_memtable(&mut guard, last_flushed_wal_id)?;
         }
 
+        // Update memtable size stat after writes (and potential freeze)
+        {
+            let guard = self.state.read();
+            let memtable_meta = guard.memtable().metadata();
+            let memtable_size = self.table_store.estimate_encoded_size(
+                memtable_meta.entry_num,
+                memtable_meta.entries_size_in_bytes,
+            );
+            self.db_stats.memtable_estimated_bytes.set(memtable_size as i64);
+        }
+
         Ok(durable_watcher)
     }
 

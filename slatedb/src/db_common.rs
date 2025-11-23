@@ -4,6 +4,7 @@ use crate::db::DbInner;
 use crate::db_state::DbState;
 use crate::error::SlateDBError;
 use crate::mem_table_flush::MemtableFlushMsg;
+use crate::stats::ReadableStat;
 use crate::utils::SendSafely;
 use crate::wal_replay::ReplayedMemtable;
 
