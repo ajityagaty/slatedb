@@ -37,10 +37,9 @@ impl DbInner {
 
         // Calculate the size of the memtable being frozen before it's replaced
         let memtable_meta = guard.memtable().metadata();
-        let frozen_memtable_size = self.table_store.estimate_encoded_size(
-            memtable_meta.entry_num,
-            memtable_meta.entries_size_in_bytes,
-        );
+        let frozen_memtable_size = self
+            .table_store
+            .estimate_encoded_size(memtable_meta.entry_num, memtable_meta.entries_size_in_bytes);
 
         guard.freeze_memtable(wal_id)?;
 

@@ -193,7 +193,11 @@ impl MemtableFlusher {
             imm_memtable.notify_flush_to_l0(Ok(()));
             self.db_inner.db_stats.immutable_memtable_flushes.inc();
             // Update statistics: subtract the flushed memtable's size
-            let current_imm_size = self.db_inner.db_stats.immutable_memtable_estimated_bytes.get();
+            let current_imm_size = self
+                .db_inner
+                .db_stats
+                .immutable_memtable_estimated_bytes
+                .get();
             self.db_inner
                 .db_stats
                 .immutable_memtable_estimated_bytes

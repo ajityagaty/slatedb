@@ -8,7 +8,8 @@ macro_rules! db_stat_name {
 }
 
 pub const IMMUTABLE_MEMTABLE_FLUSHES: &str = db_stat_name!("immutable_memtable_flushes");
-pub const IMMUTABLE_MEMTABLE_ESTIMATED_BYTES: &str = db_stat_name!("immutable_memtable_estimated_bytes");
+pub const IMMUTABLE_MEMTABLE_ESTIMATED_BYTES: &str =
+    db_stat_name!("immutable_memtable_estimated_bytes");
 pub const MEMTABLE_ESTIMATED_BYTES: &str = db_stat_name!("memtable_estimated_bytes");
 pub const SST_FILTER_FALSE_POSITIVES: &str = db_stat_name!("sst_filter_false_positives");
 pub const SST_FILTER_POSITIVES: &str = db_stat_name!("sst_filter_positives");

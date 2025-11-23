@@ -197,7 +197,9 @@ impl DbInner {
                 memtable_meta.entry_num,
                 memtable_meta.entries_size_in_bytes,
             );
-            self.db_stats.memtable_estimated_bytes.set(memtable_size as i64);
+            self.db_stats
+                .memtable_estimated_bytes
+                .set(memtable_size as i64);
         }
 
         Ok(durable_watcher)
