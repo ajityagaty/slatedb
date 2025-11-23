@@ -133,6 +133,12 @@ impl MemtableFlusher {
                 .table()
                 .last_seq()
                 .expect("flush of l0 with no entries");
+            // Calculate the size of the immutable memtable being flushed before it's removed
+            let imm_memtable_meta = imm_memtable.table().metadata();
+            let flushed_memtable_size = self.db_inner.table_store.estimate_encoded_size(
+                imm_memtable_meta.entry_num,
+                imm_memtable_meta.entries_size_in_bytes,
+            );
             {
                 let min_active_snapshot_seq = self.db_inner.txn_manager.min_active_seq();
 
@@ -185,6 +191,12 @@ impl MemtableFlusher {
             }
             imm_memtable.notify_flush_to_l0(Ok(()));
             self.db_inner.db_stats.immutable_memtable_flushes.inc();
+            // Update statistics: subtract the flushed memtable's size
+            let current_imm_size = self.db_inner.db_stats.immutable_memtable_estimated_bytes.get();
+            self.db_inner
+                .db_stats
+                .immutable_memtable_estimated_bytes
+                .set(current_imm_size - flushed_memtable_size as i64);
             match self.write_manifest_safely().await {
                 Ok(_) => {
                     // at this point we know the data in the memtable is durably stored
