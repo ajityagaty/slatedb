@@ -34,7 +34,22 @@ impl DbInner {
             return Ok(());
         }
 
+        // Calculate the size of the memtable being frozen before it's replaced
+        let memtable_meta = guard.memtable().metadata();
+        let frozen_memtable_size = self.table_store.estimate_encoded_size(
+            memtable_meta.entry_num,
+            memtable_meta.entries_size_in_bytes,
+        );
+
         guard.freeze_memtable(wal_id)?;
+
+        // Update statistics: add to immutable memtable size, reset active memtable size
+        let current_imm_size = self.db_stats.immutable_memtable_estimated_bytes.get();
+        self.db_stats
+            .immutable_memtable_estimated_bytes
+            .set(current_imm_size + frozen_memtable_size as i64);
+        self.db_stats.memtable_estimated_bytes.set(0);
+
         self.memtable_flush_notifier.send_safely(
             guard.closed_result_reader(),
             MemtableFlushMsg::FlushImmutableMemtables { sender: None },
