@@ -1595,7 +1595,7 @@ mod tests {
     };
     use crate::types::RowEntry;
     use crate::wal_reader::WalReader;
-    use crate::{proptest_util, test_utils, CloseReason, KeyValue};
+    use crate::{proptest_util, test_utils, CloseReason, CompactorBuilder, KeyValue};
     use async_trait::async_trait;
     use chrono::TimeDelta;
     use chrono::{TimeZone, Utc};
@@ -4598,7 +4598,10 @@ mod tests {
         let db = Db::builder(path, object_store.clone())
             .with_settings(test_db_options(0, 1024 * 1024, None))
             .with_merge_operator(Arc::new(StringConcatMergeOperator {}))
-            .with_compaction_scheduler_supplier(compaction_scheduler)
+            .with_compactor_builder(
+                CompactorBuilder::new(path, object_store.clone())
+                    .with_scheduler_supplier(compaction_scheduler.clone()),
+            )
             .build()
             .await
             .unwrap();
@@ -5133,7 +5136,7 @@ mod tests {
         assert!(manifest.core.next_wal_sst_id > next_wal_sst_id);
     }
 
-    async fn do_test_should_read_compacted_db(options: Settings) {
+    async fn do_test_should_read_compacted_db(mut options: Settings) {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_kv_store";
         let should_compact_l0 = Arc::new(AtomicBool::new(false));
@@ -5142,9 +5145,14 @@ mod tests {
             move |_state| this_should_compact_l0.swap(false, Ordering::SeqCst),
         )));
 
+        let compactor_options = options.compactor_options.take();
         let db = Db::builder(path, object_store.clone())
             .with_settings(options)
-            .with_compaction_scheduler_supplier(compaction_scheduler.clone())
+            .with_compactor_builder(
+                CompactorBuilder::new(path, object_store.clone())
+                    .with_scheduler_supplier(compaction_scheduler.clone())
+                    .with_options(compactor_options.unwrap()),
+            )
             .build()
             .await
             .unwrap();

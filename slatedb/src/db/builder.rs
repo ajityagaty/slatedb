@@ -120,6 +120,7 @@ use crate::compaction_filter::CompactionFilterSupplier;
 use crate::compactions_store::CompactionsStore;
 use crate::compactor::stats::CompactionStats;
 use crate::compactor::CompactorEventHandler;
+use crate::compactor::CompactorMessage;
 use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::COMPACTOR_TASK_NAME;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
@@ -168,15 +169,12 @@ pub struct DbBuilder<P: Into<Path>> {
     memory_cache: Option<Arc<dyn DbCache>>,
     system_clock: Option<Arc<dyn SystemClock>>,
     gc_runtime: Option<Handle>,
-    compaction_runtime: Option<Handle>,
-    compaction_scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
+    compactor_builder: Option<CompactorBuilder<Path>>,
     fp_registry: Arc<FailPointRegistry>,
     seed: Option<u64>,
     sst_block_size: Option<SstBlockSize>,
     merge_operator: Option<MergeOperatorType>,
     block_transformer: Option<Arc<dyn BlockTransformer>>,
-    #[cfg(feature = "compaction_filters")]
-    compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
 }
 
 impl<P: Into<Path>> DbBuilder<P> {
@@ -190,15 +188,12 @@ impl<P: Into<Path>> DbBuilder<P> {
             memory_cache: None,
             system_clock: None,
             gc_runtime: None,
-            compaction_runtime: None,
-            compaction_scheduler_supplier: None,
+            compactor_builder: None,
             fp_registry: Arc::new(FailPointRegistry::new()),
             seed: None,
             sst_block_size: None,
             merge_operator: None,
             block_transformer: None,
-            #[cfg(feature = "compaction_filters")]
-            compaction_filter_supplier: None,
         }
     }
 
@@ -240,17 +235,12 @@ impl<P: Into<Path>> DbBuilder<P> {
         self
     }
 
-    /// Sets the compaction runtime to use for the database.
-    pub fn with_compaction_runtime(mut self, compaction_runtime: Handle) -> Self {
-        self.compaction_runtime = Some(compaction_runtime);
-        self
-    }
-
-    pub fn with_compaction_scheduler_supplier(
-        mut self,
-        compaction_scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
-    ) -> Self {
-        self.compaction_scheduler_supplier = Some(compaction_scheduler_supplier);
+    /// Sets a custom CompactorBuilder for compaction orchestration.
+    ///
+    /// Mutually exclusive with `Settings::compactor_options`. Setting both
+    /// will result in an error.
+    pub fn with_compactor_builder(mut self, compactor_builder: CompactorBuilder<P>) -> Self {
+        self.compactor_builder = Some(compactor_builder.into_path_builder());
         self
     }
 
@@ -325,32 +315,6 @@ impl<P: Into<Path>> DbBuilder<P> {
         self
     }
 
-    /// Sets the compaction filter supplier for the database. The filter supplier
-    /// creates filter instances that can inspect, drop, or modify entries during
-    /// compaction.
-    ///
-    /// **Warning:** Enabling compaction filters may affect snapshot consistency.
-    /// Use compaction filters only if you know the consequences of using them.
-    ///
-    /// See [`crate::CompactionFilter`] for detailed documentation, examples, and the
-    /// filter API.
-    ///
-    /// # Arguments
-    ///
-    /// * `supplier` - An Arc-wrapped compaction filter supplier implementation.
-    ///
-    /// # Returns
-    ///
-    /// The builder instance for chaining.
-    #[cfg(feature = "compaction_filters")]
-    pub fn with_compaction_filter_supplier(
-        mut self,
-        supplier: Arc<dyn CompactionFilterSupplier>,
-    ) -> Self {
-        self.compaction_filter_supplier = Some(supplier);
-        self
-    }
-
     /// Builds and opens the database.
     pub async fn build(self) -> Result<Db, crate::Error> {
         let path = self.path.into();
@@ -401,8 +365,6 @@ impl<P: Into<Path>> DbBuilder<P> {
         });
 
         let merge_operator = self.merge_operator.or(self.settings.merge_operator.clone());
-        #[cfg(feature = "compaction_filters")]
-        let compaction_filter_supplier = self.compaction_filter_supplier.clone();
 
         // Setup the components
         let stat_registry = Arc::new(StatRegistry::new());
@@ -570,46 +532,37 @@ impl<P: Into<Path>> DbBuilder<P> {
             None,
         ));
 
-        // To keep backwards compatibility, check if the compaction_scheduler_supplier or compactor_options are set.
-        // If either are set, we need to initialize the compactor.
-        if self.compaction_scheduler_supplier.is_some() || self.settings.compactor_options.is_some()
-        {
-            let compactor_options = Arc::new(self.settings.compactor_options.unwrap_or_default());
-            let compaction_handle = self
-                .compaction_runtime
-                .unwrap_or_else(|| tokio_handle.clone());
-            let scheduler_supplier = self
-                .compaction_scheduler_supplier
-                .unwrap_or(Arc::new(SizeTieredCompactionSchedulerSupplier));
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-            let scheduler = Arc::from(scheduler_supplier.compaction_scheduler(&compactor_options));
-            let stats = Arc::new(CompactionStats::new(inner.stat_registry.clone()));
-            let executor = Arc::new(TokioCompactionExecutor::new(
-                TokioCompactionExecutorOptions {
-                    handle: compaction_handle,
-                    options: compactor_options.clone(),
-                    worker_tx: tx,
-                    table_store: uncached_table_store.clone(),
-                    rand: rand.clone(),
-                    stats: stats.clone(),
-                    clock: system_clock.clone(),
-                    manifest_store: manifest_store.clone(),
-                    merge_operator: merge_operator.clone(),
-                    #[cfg(feature = "compaction_filters")]
-                    compaction_filter_supplier: compaction_filter_supplier.clone(),
-                },
-            ));
-            let handler = CompactorEventHandler::new(
-                manifest_store.clone(),
-                compactions_store.clone(),
-                compactor_options.clone(),
-                scheduler,
-                executor,
-                rand.clone(),
-                stats.clone(),
-                system_clock.clone(),
+        if self.compactor_builder.is_some() && self.settings.compactor_options.is_some() {
+            return Err(SlateDBError::InvalidCompactorOptions(
+                "cannot set both compactor_builder and compactor_options".into(),
             )
-            .await?;
+            .into());
+        }
+
+        let compactor_builder = self.compactor_builder.or_else(|| {
+            self.settings.compactor_options.as_ref().map(|opts| {
+                CompactorBuilder::new(path.clone(), retrying_main_object_store.clone())
+                    .with_options(opts.clone())
+            })
+        });
+
+        if let Some(compactor_builder) = compactor_builder {
+            let mut builder = compactor_builder
+                .with_system_clock(system_clock.clone())
+                .with_stat_registry(inner.stat_registry.clone())
+                .with_seed(rand.seed());
+
+            if let Some(operator) = merge_operator {
+                builder = builder.with_merge_operator(operator);
+            }
+
+            let (handler, rx) = builder
+                .build_handler(
+                    uncached_table_store.clone(),
+                    manifest_store.clone(),
+                    compactions_store.clone(),
+                )
+                .await?;
             task_executor.add_handler(
                 COMPACTOR_TASK_NAME.to_string(),
                 Box::new(handler),
@@ -872,6 +825,24 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         }
     }
 
+    pub fn into_path_builder(self) -> CompactorBuilder<Path> {
+        CompactorBuilder {
+            path: self.path.into(),
+            main_object_store: self.main_object_store,
+            compaction_runtime: self.compaction_runtime,
+            options: self.options,
+            scheduler_supplier: self.scheduler_supplier,
+            rand: self.rand,
+            stat_registry: self.stat_registry,
+            system_clock: self.system_clock,
+            closed_result: self.closed_result,
+            merge_operator: self.merge_operator,
+            block_transformer: self.block_transformer,
+            #[cfg(feature = "compaction_filters")]
+            compaction_filter_supplier: self.compaction_filter_supplier,
+        }
+    }
+
     /// Sets the tokio handle to use for background tasks.
     #[allow(unused)]
     pub fn with_runtime(mut self, compaction_runtime: Handle) -> Self {
@@ -898,7 +869,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         self
     }
 
-    /// Sets the random number generator to use for the compactor.
+    /// Creates the random number generator to use for the compactor with given seed.
     pub fn with_seed(mut self, seed: u64) -> Self {
         self.rand = Arc::new(DbRand::new(seed));
         self
@@ -997,6 +968,60 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             #[cfg(feature = "compaction_filters")]
             self.compaction_filter_supplier,
         )
+    }
+
+    /// Build a CompactorEventHandler from this builder's configuration.
+    ///
+    /// Constructs the compaction scheduler, executor, and stats, then
+    /// returns the handler and its message receiver, which are needed
+    /// to register the compactor with the task executor in DbBuilder::build
+    pub(crate) async fn build_handler(
+        self,
+        table_store: Arc<TableStore>,
+        manifest_store: Arc<ManifestStore>,
+        compactions_store: Arc<CompactionsStore>,
+    ) -> Result<
+        (
+            CompactorEventHandler,
+            mpsc::UnboundedReceiver<CompactorMessage>,
+        ),
+        SlateDBError,
+    > {
+        let options = Arc::new(self.options);
+        let handle = self.compaction_runtime;
+        let scheduler_supplier = self
+            .scheduler_supplier
+            .unwrap_or(Arc::new(SizeTieredCompactionSchedulerSupplier));
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = Arc::from(scheduler_supplier.compaction_scheduler(&options));
+        let stats = Arc::new(CompactionStats::new(self.stat_registry));
+        let executor = Arc::new(TokioCompactionExecutor::new(
+            TokioCompactionExecutorOptions {
+                handle,
+                options: options.clone(),
+                worker_tx: tx,
+                table_store,
+                rand: self.rand.clone(),
+                stats: stats.clone(),
+                clock: self.system_clock.clone(),
+                manifest_store: manifest_store.clone(),
+                merge_operator: self.merge_operator,
+                #[cfg(feature = "compaction_filters")]
+                compaction_filter_supplier: self.compaction_filter_supplier,
+            },
+        ));
+        let handler = CompactorEventHandler::new(
+            manifest_store,
+            compactions_store,
+            options,
+            scheduler,
+            executor,
+            self.rand,
+            stats,
+            self.system_clock,
+        )
+        .await?;
+        Ok((handler, rx))
     }
 }
 

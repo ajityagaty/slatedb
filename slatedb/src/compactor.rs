@@ -1173,14 +1173,17 @@ mod tests {
             },
         )));
 
-        let mut options = db_options(Some(compactor_options()));
+        let mut options = db_options(None);
         options.wal_enabled = false;
         options.l0_sst_size_bytes = 128;
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
             .with_system_clock(system_clock.clone())
-            .with_compaction_scheduler_supplier(scheduler.clone())
+            .with_compactor_builder(compactor_builder_with_scheduler(
+                os.clone(),
+                scheduler.clone(),
+            ))
             .build()
             .await
             .unwrap();
@@ -1277,14 +1280,17 @@ mod tests {
             },
         )));
 
-        let mut options = db_options(Some(compactor_options()));
+        let mut options = db_options(None);
         options.wal_enabled = false;
         options.l0_sst_size_bytes = 128;
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
             .with_system_clock(system_clock.clone())
-            .with_compaction_scheduler_supplier(scheduler.clone())
+            .with_compactor_builder(compactor_builder_with_scheduler(
+                os.clone(),
+                scheduler.clone(),
+            ))
             .build()
             .await
             .unwrap();
@@ -1376,12 +1382,15 @@ mod tests {
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| state.manifest().l0.len() >= 2,
         )));
-        let options = db_options(Some(compactor_options()));
+        let options = db_options(None);
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
             .with_system_clock(system_clock.clone())
-            .with_compaction_scheduler_supplier(compaction_scheduler)
+            .with_compactor_builder(compactor_builder_with_scheduler(
+                os.clone(),
+                compaction_scheduler.clone(),
+            ))
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
             .await
@@ -1502,12 +1511,15 @@ mod tests {
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| !state.manifest().l0.is_empty(),
         )));
-        let options = db_options(Some(compactor_options()));
+        let options = db_options(None);
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
             .with_system_clock(system_clock.clone())
-            .with_compaction_scheduler_supplier(compaction_scheduler)
+            .with_compactor_builder(compactor_builder_with_scheduler(
+                os.clone(),
+                compaction_scheduler.clone(),
+            ))
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
             .await
@@ -1633,12 +1645,15 @@ mod tests {
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| state.manifest().l0.len() >= 2,
         )));
-        let options = db_options(Some(compactor_options()));
+        let options = db_options(None);
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
             .with_system_clock(system_clock.clone())
-            .with_compaction_scheduler_supplier(compaction_scheduler)
+            .with_compactor_builder(compactor_builder_with_scheduler(
+                os.clone(),
+                compaction_scheduler.clone(),
+            ))
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
             .await
@@ -1746,12 +1761,15 @@ mod tests {
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| state.manifest().l0.len() >= 3,
         )));
-        let options = db_options(Some(compactor_options()));
+        let options = db_options(None);
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
             .with_system_clock(system_clock.clone())
-            .with_compaction_scheduler_supplier(compaction_scheduler)
+            .with_compactor_builder(compactor_builder_with_scheduler(
+                os.clone(),
+                compaction_scheduler.clone(),
+            ))
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
             .await
@@ -1876,14 +1894,17 @@ mod tests {
             |state| state.manifest().l0.len() >= 2,
         )));
 
-        let mut options = db_options(Some(compactor_options()));
+        let mut options = db_options(None);
         options.wal_enabled = false;
         options.l0_sst_size_bytes = 128;
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
             .with_system_clock(insert_clock.clone())
-            .with_compaction_scheduler_supplier(scheduler)
+            .with_compactor_builder(compactor_builder_with_scheduler(
+                os.clone(),
+                scheduler.clone(),
+            ))
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
             .await
@@ -1958,12 +1979,15 @@ mod tests {
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| state.manifest().l0.len() >= 2,
         )));
-        let options = db_options(Some(compactor_options()));
+        let options = db_options(None);
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
             .with_system_clock(system_clock.clone())
-            .with_compaction_scheduler_supplier(compaction_scheduler)
+            .with_compactor_builder(compactor_builder_with_scheduler(
+                os.clone(),
+                compaction_scheduler.clone(),
+            ))
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
             .await
@@ -2056,12 +2080,15 @@ mod tests {
         let compaction_scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
             |state| state.manifest().l0.len() >= 2,
         )));
-        let options = db_options(Some(compactor_options()));
+        let options = db_options(None);
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
             .with_system_clock(system_clock.clone())
-            .with_compaction_scheduler_supplier(compaction_scheduler)
+            .with_compactor_builder(compactor_builder_with_scheduler(
+                os.clone(),
+                compaction_scheduler.clone(),
+            ))
             .with_merge_operator(Arc::new(StringConcatMergeOperator))
             .build()
             .await
@@ -3695,6 +3722,15 @@ mod tests {
             scheduler_options: Default::default(),
             ..CompactorOptions::default()
         }
+    }
+
+    fn compactor_builder_with_scheduler(
+        os: Arc<dyn ObjectStore>,
+        scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
+    ) -> CompactorBuilder<&'static str> {
+        CompactorBuilder::new(PATH, os)
+            .with_options(compactor_options())
+            .with_scheduler_supplier(scheduler_supplier)
     }
 
     struct MockSchedulerInner {
