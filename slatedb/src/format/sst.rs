@@ -1,6 +1,6 @@
 use crate::blob::ReadOnlyBlob;
 use crate::config::CompressionCodec;
-use crate::db_state::{SsTableInfo, SsTableInfoCodec};
+use crate::db_state::{SsTableInfo, SsTableInfoCodec, SstType};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilter;
 use crate::flatbuffer_types::{
@@ -275,6 +275,8 @@ pub(crate) struct EncodedSsTableFooterBuilder<'a, 'b> {
     filter: Option<(Arc<BloomFilter>, Bytes)>,
     /// SST format version
     sst_format_version: u16,
+    /// type of SST (Compacted or Wal)
+    sst_type: SstType,
 }
 
 impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
@@ -285,6 +287,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
         index_builder: flatbuffers::FlatBufferBuilder<'b, DefaultAllocator>,
         block_meta: Vec<flatbuffers::WIPOffset<BlockMeta<'b>>>,
         sst_format_version: u16,
+        sst_type: SstType,
     ) -> Self {
         Self {
             blocks_size: blocks_len,
@@ -296,6 +299,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
             block_meta,
             filter: None,
             sst_format_version,
+            sst_type,
         }
     }
 
@@ -364,6 +368,7 @@ impl<'a, 'b> EncodedSsTableFooterBuilder<'a, 'b> {
             filter_offset,
             filter_len,
             compression_codec: self.compression_codec,
+            sst_type: self.sst_type,
         };
         SsTableInfo::encode(&info, &mut buf, self.sst_info_codec);
 

@@ -55,7 +55,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crate::config::CompressionCodec;
-use crate::db_state::SsTableInfoCodec;
+use crate::db_state::{SsTableInfoCodec, SstType};
 use crate::error::SlateDBError;
 use crate::filter::BloomFilterBuilder;
 use crate::flatbuffer_types::{BlockMeta, BlockMetaArgs};
@@ -335,6 +335,7 @@ impl EncodedSsTableBuilder<'_> {
             self.index_builder,
             self.block_meta,
             self.sst_format_version,
+            SstType::Compacted,
         );
         if let Some(codec) = self.compression_codec {
             footer_builder = footer_builder.with_compression_codec(codec);
