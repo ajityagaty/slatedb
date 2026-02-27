@@ -1021,6 +1021,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn should_read_with_wal_object_store() {
+        let main_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let wal_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store_wal_reader");
+
+        let db = Db::builder(path.clone(), Arc::clone(&main_store))
+            .with_wal_object_store(Arc::clone(&wal_store))
+            .build()
+            .await
+            .unwrap();
+        db.put(b"key", b"value").await.unwrap();
+        db.flush().await.unwrap();
+        db.close().await.unwrap();
+
+        let reader = DbReader::builder(path.clone(), Arc::clone(&main_store))
+            .with_wal_object_store(Arc::clone(&wal_store))
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            reader.get(b"key").await.unwrap(),
+            Some(Bytes::from_static(b"value"))
+        );
+    }
+
+    #[tokio::test]
+    async fn should_fail_if_wal_store_not_provided() {
+        let main_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let wal_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store_wal_reader_missing");
+
+        let db = Db::builder(path.clone(), Arc::clone(&main_store))
+            .with_wal_object_store(Arc::clone(&wal_store))
+            .build()
+            .await
+            .unwrap();
+        db.close().await.unwrap();
+
+        let err = match DbReader::builder(path.clone(), Arc::clone(&main_store))
+            .build()
+            .await
+        {
+            Ok(_) => panic!("expected WalStoreReconfigurationError"),
+            Err(err) => err,
+        };
+
+        assert!(err
+            .to_string()
+            .contains("wal store reconfiguration unsupported"));
+    }
+
+    #[tokio::test]
     async fn should_get_latest_value_from_checkpoint() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");

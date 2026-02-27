@@ -1120,6 +1120,12 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
         self
     }
 
+    /// Sets the separate object store dedicated specifically for WAL.
+    pub fn with_wal_object_store(mut self, wal_object_store: Arc<dyn ObjectStore>) -> Self {
+        self.wal_object_store = Some(wal_object_store);
+        self
+    }
+
     /// Sets the system clock to use for the reader.
     pub fn with_system_clock(mut self, system_clock: Arc<dyn SystemClock>) -> Self {
         self.system_clock = system_clock;
@@ -1145,11 +1151,22 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
     /// Builds and returns a DbReader instance.
     pub async fn build(self) -> Result<DbReader, crate::Error> {
         let path = self.path.into();
-        let retrying_object_store = Arc::new(RetryingObjectStore::new(
+        // TODO: proper URI generation, for now it works just as a flag
+        let wal_object_store_uri = self.wal_object_store.as_ref().map(|_| String::new());
+
+        let retrying_main_object_store = Arc::new(RetryingObjectStore::new(
             self.object_store,
             self.rand.clone(),
             self.system_clock.clone(),
         ));
+        let retrying_wal_object_store: Option<Arc<dyn ObjectStore>> =
+            self.wal_object_store.map(|s| {
+                Arc::new(RetryingObjectStore::new(
+                    s,
+                    self.rand.clone(),
+                    self.system_clock.clone(),
+                )) as Arc<dyn ObjectStore>
+            });
 
         let retrying_wal_object_store: Option<Arc<dyn ObjectStore>> =
             self.wal_object_store.map(|s| {
@@ -1162,7 +1179,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
 
         // Setup object store with optional caching
         let maybe_cached = CachedObjectStore::from_config(
-            retrying_object_store.clone(),
+            retrying_main_object_store.clone(),
             &self.options.object_store_cache_options,
             self.stat_registry.as_ref(),
             self.system_clock.clone(),
@@ -1170,14 +1187,25 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
         )
         .await?;
 
-        let object_store: Arc<dyn ObjectStore> = match &maybe_cached {
+        let main_object_store: Arc<dyn ObjectStore> = match &maybe_cached {
             Some(cached) => Arc::clone(cached) as Arc<dyn ObjectStore>,
-            None => retrying_object_store,
+            None => retrying_main_object_store,
         };
+
+        let manifest_store = Arc::new(ManifestStore::new(&path, main_object_store.clone()));
+        let latest_manifest =
+            StoredManifest::try_load(manifest_store, self.system_clock.clone()).await?;
+
+        // Validate WAL object store configuration
+        if let Some(latest_manifest) = &latest_manifest {
+            if latest_manifest.db_state().wal_object_store_uri != wal_object_store_uri {
+                return Err(SlateDBError::WalStoreReconfigurationError.into());
+            }
+        }
 
         let store_provider = DefaultStoreProvider {
             path: path.clone(),
-            object_store,
+            object_store: main_object_store,
             wal_object_store: retrying_wal_object_store,
             block_cache: self.options.block_cache.clone(),
             block_transformer: self.options.block_transformer.clone(),
