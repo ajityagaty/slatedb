@@ -1065,6 +1065,7 @@ mod tests {
     use crate::stats::StatRegistry;
     use crate::tablestore::TableStore;
     use crate::test_utils::assert_iterator;
+    use crate::types::KeyValue;
     use crate::types::RowEntry;
     use bytes::Bytes;
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
@@ -1145,7 +1146,7 @@ mod tests {
                 .expect("Expected Some(iter) but got None");
 
                 // remove the key from the expected map and verify that the db matches
-                while let Some(kv) = iter.next().await.unwrap() {
+                while let Some(kv) = iter.next().await.unwrap().map(KeyValue::from) {
                     let expected_v = expected
                         .remove(kv.key.as_ref())
                         .expect("removing unexpected key");
@@ -1230,7 +1231,7 @@ mod tests {
         .unwrap()
         .expect("Expected Some(iter) but got None");
 
-        let tombstone = iter.next_entry().await.unwrap();
+        let tombstone = iter.next().await.unwrap();
         assert!(tombstone.unwrap().value.is_tombstone());
 
         let db_state = await_compacted_compaction(
@@ -1258,9 +1259,9 @@ mod tests {
 
         // should be no tombstone for key 'a' because it was filtered
         // out of the last run
-        let next = iter.next().await.unwrap();
+        let next = iter.next().await.unwrap().map(KeyValue::from);
         assert_eq!(next.unwrap().key.as_ref(), &[b'b'; 16]);
-        let next = iter.next().await.unwrap();
+        let next = iter.next().await.unwrap().map(KeyValue::from);
         assert!(next.is_none());
     }
 
@@ -1355,22 +1356,25 @@ mod tests {
 
         // After compaction with an active snapshot (protecting seq >= 1):
         // - Key 'a': Both the tombstone(seq=3) and original value(seq=1) are protected
-        //   The SST contains both versions, but the iterator returns the latest (tombstone)
+        //   The SST contains both versions
         // - Key 'b': value(seq=2) is protected
         // Expected result: both 'a' (as tombstone) and 'b' (as value) should be present
-        let next = iter.next().await.unwrap();
-        let entry_a = next.unwrap();
-        assert_eq!(entry_a.key.as_ref(), &[b'a'; 16]);
+        // Note: next() returns all entries including tombstones and duplicates,
+        // so we need to track whether we've seen each key and verify the expected type
+        let next = iter.next().await.unwrap().unwrap();
+        assert_eq!(next.key.as_ref(), &[b'a'; 16]);
+        assert!(next.value.is_tombstone());
+
+        let next = iter.next().await.unwrap().unwrap();
+        assert_eq!(next.key.as_ref(), &[b'a'; 16]);
+        assert!(!next.value.is_tombstone());
+
+        let next = iter.next().await.unwrap().unwrap();
+        assert_eq!(next.key.as_ref(), &[b'b'; 16]);
+        assert!(!next.value.is_tombstone());
 
         let next = iter.next().await.unwrap();
-        let entry_b = next.unwrap();
-        assert_eq!(entry_b.key.as_ref(), &[b'b'; 16]);
-
-        let next = iter.next().await.unwrap();
-        assert!(
-            next.is_none(),
-            "Expected two keys (a and b) in the compacted SST"
-        );
+        assert!(next.is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2179,7 +2183,7 @@ mod tests {
 
         // merge operations should be kept separate due to different expire times
         let mut key1_entries = vec![];
-        while let Some(entry) = iter.next_entry().await.unwrap() {
+        while let Some(entry) = iter.next().await.unwrap() {
             if entry.key.as_ref() == b"key1" {
                 key1_entries.push(entry);
             }

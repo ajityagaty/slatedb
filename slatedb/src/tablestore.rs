@@ -659,6 +659,7 @@ fn slatedb_io_error() -> SlateDBError {
 
 #[cfg(test)]
 mod tests {
+    use crate::types::KeyValue;
     use bytes::Bytes;
     use futures::future;
     use futures::StreamExt;
@@ -1249,7 +1250,7 @@ mod tests {
 
         while let (Some(block), Some(expected_item)) = (block_iter.next(), expected_iter.next()) {
             let mut iter = BlockIteratorLatest::new_ascending(block.clone());
-            let kv = iter.next().await.unwrap().unwrap();
+            let kv: KeyValue = iter.next().await.unwrap().unwrap().into();
             assert_eq!(kv.key, expected_item.0);
             assert_eq!(ValueDeletable::Value(kv.value), expected_item.1);
         }

@@ -36,8 +36,8 @@ impl<T: KeyValueIterator> KeyValueIterator for FilterIterator<T> {
         self.iterator.init().await
     }
 
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        while let Some(entry) = self.iterator.next_entry().await? {
+    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        while let Some(entry) = self.iterator.next().await? {
             if (self.predicate)(&entry) {
                 return Ok(Some(entry));
             }
@@ -54,7 +54,7 @@ impl<T: KeyValueIterator> KeyValueIterator for FilterIterator<T> {
 mod tests {
     use super::*;
     use crate::test_utils::assert_iterator;
-    use crate::types::RowEntry;
+    use crate::types::{KeyValue, RowEntry};
 
     #[tokio::test]
     async fn test_filter_iterator_should_return_only_matching_entries() {
@@ -95,7 +95,7 @@ mod tests {
 
         let mut filter_iter = FilterIterator::new(iter, Box::new(filter_entry));
 
-        assert_eq!(filter_iter.next().await.unwrap(), None);
+        assert_eq!(filter_iter.next().await.unwrap().map(KeyValue::from), None);
     }
 
     #[tokio::test]

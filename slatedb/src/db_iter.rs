@@ -125,11 +125,11 @@ impl KeyValueIterator for GetIterator {
         Ok(())
     }
 
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         while self.idx < self.iters.len() {
             // initialization is idempotent, so we can call it multiple times
             self.iters[self.idx].init().await?;
-            let result = self.iters[self.idx].next_entry().await?;
+            let result = self.iters[self.idx].next().await?;
             if let Some(entry) = result {
                 // Note: The Get iterator should not advance past tombstones, which is
                 // why we filter them out here. When a tombstone is encountered, we return None
@@ -194,8 +194,8 @@ impl KeyValueIterator for ScanIterator {
         self.delegate.init().await
     }
 
-    async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        self.delegate.next_entry().await
+    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        self.delegate.next().await
     }
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
@@ -292,20 +292,50 @@ impl DbIterator {
     ///
     /// Returns [`Error`] if the iterator has been invalidated due to an underlying error.
     pub async fn next(&mut self) -> Result<Option<KeyValue>, crate::Error> {
-        self.next_key_value().await.map_err(Into::into)
+        let entry_opt = self.next_row().await?;
+        match entry_opt {
+            Some(entry) => {
+                let val_bytes = entry.value.as_bytes().ok_or_else(|| {
+                    crate::Error::from(crate::error::SlateDBError::UnexpectedTombstone)
+                })?;
+                Ok(Some(KeyValue {
+                    key: entry.key,
+                    value: val_bytes,
+                }))
+            }
+            None => Ok(None),
+        }
     }
 
-    pub(crate) async fn next_key_value(&mut self) -> Result<Option<KeyValue>, SlateDBError> {
+    /// Get the next row in the scan.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error`] if the iterator has been invalidated due to an underlying error.
+    pub async fn next_row(&mut self) -> Result<Option<RowEntry>, crate::Error> {
+        self.next_row_internal().await.map_err(Into::into)
+    }
+
+    pub(crate) async fn next_row_internal(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         if let Some(error) = self.invalidated_error.clone() {
             Err(error)
         } else {
-            let result = self.iter.next().await;
+            let result = loop {
+                match self.iter.next().await {
+                    Ok(Some(entry)) => match entry.value {
+                        ValueDeletable::Tombstone => continue,
+                        _ => break Ok(Some(entry)),
+                    },
+                    Ok(None) => break Ok(None),
+                    Err(e) => break Err(e),
+                }
+            };
             let result = self.maybe_invalidate(result);
-            if let Ok(Some(ref kv)) = result {
-                self.last_key = Some(kv.key.clone());
+            if let Ok(Some(ref entry)) = result {
+                self.last_key = Some(entry.key.clone());
                 // Track the key in range tracker if present
                 if let Some(tracker) = &self.range_tracker {
-                    tracker.track_key(&kv.key);
+                    tracker.track_key(&entry.key);
                 }
             }
             result

@@ -3645,13 +3645,13 @@ mod tests {
             .await
             .unwrap()
             .expect("Expected Some(iter) but got None");
-            let kv = iter.next().await.unwrap().unwrap();
+            let kv: KeyValue = iter.next().await.unwrap().unwrap().into();
             assert_eq!(kv.key.as_ref(), [b'a' + i; 16]);
             assert_eq!(kv.value.as_ref(), [b'b' + i; 50]);
-            let kv = iter.next().await.unwrap().unwrap();
+            let kv: KeyValue = iter.next().await.unwrap().unwrap().into();
             assert_eq!(kv.key.as_ref(), [b'j' + i; 16]);
             assert_eq!(kv.value.as_ref(), [b'k' + i; 50]);
-            let kv = iter.next().await.unwrap();
+            let kv = iter.next().await.unwrap().map(KeyValue::from);
             assert!(kv.is_none());
         }
         assert!(
@@ -3884,7 +3884,7 @@ mod tests {
 
         // Collect all key-value pairs from the SST
         let mut found_keys = std::collections::HashSet::new();
-        while let Some(kv) = iter.next().await.unwrap() {
+        while let Some(kv) = iter.next().await.unwrap().map(KeyValue::from) {
             found_keys.insert(kv.key.to_vec());
         }
 
@@ -3942,7 +3942,7 @@ mod tests {
             .await
             .expect("expected successful WAL iterator call");
         while let Some(entry) = wal_iter
-            .next_entry()
+            .next()
             .await
             .expect("expected successful WAL rows read")
         {
@@ -4456,15 +4456,15 @@ mod tests {
         };
 
         let mut iter = memtable.iter();
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv: KeyValue = iter.next().await.unwrap().unwrap().into();
         assert_eq!(kv.key, b"abc1111".as_slice());
 
         kv_store.flush().await.unwrap();
 
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv: KeyValue = iter.next().await.unwrap().unwrap().into();
         assert_eq!(kv.key, b"abc2222".as_slice());
 
-        let kv = iter.next().await.unwrap().unwrap();
+        let kv: KeyValue = iter.next().await.unwrap().unwrap().into();
         assert_eq!(kv.key, b"abc3333".as_slice());
     }
 
