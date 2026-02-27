@@ -20,6 +20,8 @@
 //! }
 //! ```
 
+pub use crate::db_status::DbStatus;
+
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
@@ -60,7 +62,7 @@ use crate::manifest::store::FenceableManifest;
 use crate::manifest::{Manifest, ManifestCore};
 use crate::mem_table::WritableKVTable;
 use crate::mem_table_flush::{MemtableFlushMsg, MEMTABLE_FLUSHER_TASK_NAME};
-use crate::oracle::DbOracle;
+use crate::oracle::{DbOracle, Oracle};
 use crate::paths::PathResolver;
 use crate::rand::DbRand;
 use crate::reader::Reader;
@@ -68,12 +70,13 @@ use crate::sst_iter::SstIteratorOptions;
 use crate::stats::StatRegistry;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
-use crate::utils::{format_bytes_si, MonotonicSeq, SendSafely};
+use crate::utils::{format_bytes_si, SendSafely};
 use crate::wal_buffer::{WalBufferManager, WAL_BUFFER_TASK_NAME};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use slatedb_common::clock::SystemClock;
 use slatedb_txn_obj::DirtyObject;
 
+use crate::db_status::DbStatusReporter;
 pub use builder::DbBuilder;
 pub use builder::DbReaderBuilder;
 
@@ -102,6 +105,7 @@ pub(crate) struct DbInner {
     pub(crate) wal_enabled: bool,
     /// [`txn_manager`] tracks all the live transactions and related metadata.
     pub(crate) txn_manager: Arc<TransactionManager>,
+    pub(crate) status_reporter: DbStatusReporter,
 }
 
 impl DbInner {
@@ -119,13 +123,12 @@ impl DbInner {
     ) -> Result<Self, SlateDBError> {
         // both last_seq and last_committed_seq will be updated after WAL replay.
         let last_l0_seq = manifest.value.core.last_l0_seq;
-        let last_seq = MonotonicSeq::new(last_l0_seq);
-        let last_committed_seq = MonotonicSeq::new(last_l0_seq);
-        let last_remote_persisted_seq = MonotonicSeq::new(last_l0_seq);
+        let status_reporter = DbStatusReporter::new(last_l0_seq);
         let oracle = Arc::new(DbOracle::new(
-            last_seq,
-            last_committed_seq,
-            last_remote_persisted_seq,
+            last_l0_seq,
+            last_l0_seq,
+            last_l0_seq,
+            status_reporter.clone(),
         ));
 
         let mono_clock = Arc::new(MonotonicClock::new(
@@ -134,7 +137,8 @@ impl DbInner {
         ));
 
         // state are mostly manifest, including IMM, L0, etc.
-        let state = Arc::new(RwLock::new(DbState::new(manifest)));
+        let db_state = DbState::new(manifest, status_reporter.clone());
+        let state = Arc::new(RwLock::new(db_state));
 
         let db_stats = DbStats::new(stat_registry.as_ref());
         let wal_enabled = DbInner::wal_enabled_in_options(&settings);
@@ -179,6 +183,7 @@ impl DbInner {
             fp_registry,
             reader,
             txn_manager,
+            status_reporter,
         };
         Ok(db_inner)
     }
@@ -511,14 +516,12 @@ impl DbInner {
             // durable. Update `last_remote_persisted_seq` before replaying to avoid a race with
             // the memtable flusher. The flusher calls flush_wals() to guarantee all data in the
             // memtable is already durable in the WAL. Since we're replaying, the WAL is empty and
-            // `last_remote_persisted_seq` does not get updated; it remaiuns at l0_last_seq. This
-            // would cause the flusher's assertion that the remoted persisted seq is always >= the
+            // `last_remote_persisted_seq` does not get updated; it remains at l0_last_seq. This
+            // would cause the flusher's assertion that the remote persisted seq is always >= the
             // last seq in the memtable to fail. By updating `last_remote_persisted_seq` here, we
             // ensure the assertion holds true.
-            assert!(self.oracle.last_remote_persisted_seq.load() <= replayed_table.last_seq);
-            self.oracle
-                .last_remote_persisted_seq
-                .store_if_greater(replayed_table.last_seq);
+            assert!(self.oracle.last_remote_persisted_seq() <= replayed_table.last_seq);
+            self.oracle.advance_durable_seq(replayed_table.last_seq);
             self.maybe_apply_backpressure().await?;
             self.replay_memtable(replayed_table)?;
         }
@@ -1437,6 +1440,47 @@ impl Db {
     /// This returns the in-memory manifest snapshot currently held by the `Db`.
     pub fn manifest(&self) -> ManifestCore {
         self.inner.state.read().state().core().clone()
+    }
+
+    /// Subscribe to database state changes.
+    ///
+    /// Returns a [`tokio::sync::watch::Receiver<DbStatus>`] that always
+    /// reflects the latest database status. For example, you can wait for a
+    /// specific sequence number to become durable:
+    ///
+    /// ```ignore
+    /// let seq = 42; // sequence number from a write operation
+    /// let mut rx = db.subscribe();
+    /// rx.wait_for(|s| s.durable_seq >= seq).await.expect("db dropped");
+    /// ```
+    ///
+    /// # Deadlock risk
+    ///
+    /// The returned receiver holds a read lock on the current value while
+    /// borrowed (via [`borrow`](tokio::sync::watch::Receiver::borrow),
+    /// [`borrow_and_update`](tokio::sync::watch::Receiver::borrow_and_update),
+    /// or the guard returned by [`wait_for`](tokio::sync::watch::Receiver::wait_for)).
+    /// The database must acquire a write lock to publish new status updates.
+    /// Holding the read guard for an extended period will block all database
+    /// status updates and may cause a deadlock. See the [deadlock warning in
+    /// `Receiver::borrow`](https://docs.rs/tokio/latest/tokio/sync/watch/struct.Receiver.html#method.borrow)
+    /// for details. Always clone or copy the data you need:
+    ///
+    /// ```ignore
+    /// // Good: clone the status and release the lock immediately.
+    /// let status = rx.borrow().clone();
+    /// some_async_fn(status.durable_seq).await;
+    ///
+    /// // Good: copy the durable seq and releate the lock immediately.
+    /// let durable_seq = rx.borrow().durable_seq; // uses Copy trait
+    /// some_async_fn(durable_seq).await;
+    ///
+    /// // Bad: holding the status across an await blocks all senders.
+    /// let status = rx.borrow();
+    /// some_async_fn(status.durable_seq).await; // deadlock!
+    /// ```
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
+        self.inner.status_reporter.subscribe()
     }
 
     /// Begin a new transaction with the specified isolation level.
@@ -6620,6 +6664,220 @@ mod tests {
         assert_eq!(
             db.get(b"k1").await.unwrap(),
             Some(Bytes::from_static(b"v2"))
+        );
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn should_notify_seq_watcher_on_wal_flush() {
+        // Given: a DB with WAL enabled and a seq watcher
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_watch_wal", object_store)
+            .build()
+            .await
+            .unwrap();
+        let mut watcher = db.subscribe();
+
+        // When: writing multiple keys and flushing the WAL
+        db.put(b"key1", b"value1").await.unwrap();
+        db.put(b"key2", b"value2").await.unwrap();
+        db.put(b"key3", b"value3").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::Wal,
+        })
+        .await
+        .unwrap();
+
+        // Then: the watcher should report durable_seq >= 3
+        let status = tokio::time::timeout(
+            Duration::from_secs(10),
+            watcher.wait_for(|s| s.durable_seq >= 3),
+        )
+        .await
+        .expect("timed out waiting for seq update")
+        .expect("watch channel closed")
+        .clone();
+        assert!(
+            status.durable_seq >= 3,
+            "expected durable seq >= 3, got {}",
+            status.durable_seq
+        );
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn should_close_watcher_on_db_drop() {
+        // Given: a DB with a watcher
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_watch_drop", object_store)
+            .build()
+            .await
+            .unwrap();
+        let mut watcher = db.subscribe();
+
+        // When: the DB is closed
+        db.close().await.unwrap();
+
+        // Then: the watcher should report close_reason = Clean
+        let status = watcher
+            .wait_for(|s| s.close_reason.is_some())
+            .await
+            .expect("watch channel closed")
+            .clone();
+        assert_eq!(
+            status.close_reason,
+            Some(CloseReason::Clean),
+            "expected close_reason = Clean after db close",
+        );
+
+        // When: the DB is dropped (drops the watch sender)
+        drop(db);
+
+        // Then: the watcher's changed() should return Err (channel closed)
+        let result = watcher.changed().await;
+        assert!(
+            result.is_err(),
+            "expected watch channel closed after db drop, got Ok",
+        );
+    }
+
+    #[tokio::test]
+    async fn should_report_close_reason_clean_on_db_close() {
+        // Given: a DB with a watcher
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_close_reason_clean", object_store)
+            .build()
+            .await
+            .unwrap();
+        let mut watcher = db.subscribe();
+
+        // When: the DB is closed cleanly
+        db.close().await.unwrap();
+
+        // Then: the watcher should report close_reason = Clean
+        let status = watcher
+            .wait_for(|s| s.close_reason.is_some())
+            .await
+            .expect("watch channel closed")
+            .clone();
+        assert_eq!(status.close_reason, Some(CloseReason::Clean));
+    }
+
+    #[tokio::test]
+    async fn should_report_close_reason_panic_on_background_task_failure() {
+        // Given: a DB with a failpoint on WAL flush and a watcher
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_close_reason_panic", object_store)
+            .with_settings(test_db_options(0, 128, None))
+            .with_fp_registry(fp_registry.clone())
+            .build()
+            .await
+            .unwrap();
+        let mut watcher = db.subscribe();
+
+        // When: a background task panics
+        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "panic").unwrap();
+        let _ = db.put(b"foo", b"bar").await;
+
+        // Then: the watcher should report close_reason = Panic
+        let status = tokio::time::timeout(
+            Duration::from_secs(10),
+            watcher.wait_for(|s| s.close_reason.is_some()),
+        )
+        .await
+        .expect("timed out waiting for close reason")
+        .expect("watch channel closed")
+        .clone();
+        assert_eq!(status.close_reason, Some(CloseReason::Panic));
+    }
+
+    #[tokio::test]
+    async fn should_report_close_reason_fenced_on_fenced_error() {
+        // Given: a DB with a watcher
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_close_reason_fenced", object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+        let mut watcher = db.subscribe();
+
+        // When: the DB is fenced (simulated via closed_result)
+        db.inner
+            .state
+            .write()
+            .closed_result()
+            .write(Err(crate::error::SlateDBError::Fenced));
+
+        // Then: the watcher should report close_reason = Fenced
+        let status = tokio::time::timeout(
+            Duration::from_secs(10),
+            watcher.wait_for(|s| s.close_reason.is_some()),
+        )
+        .await
+        .expect("timed out waiting for close reason")
+        .expect("watch channel closed")
+        .clone();
+        assert_eq!(status.close_reason, Some(CloseReason::Fenced));
+    }
+
+    #[cfg(feature = "wal_disable")]
+    #[tokio::test]
+    async fn should_notify_seq_watcher_on_l0_flush_when_wal_disabled() {
+        // Given: a DB with WAL disabled and a seq watcher
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut options = test_db_options(0, 256, None);
+        options.wal_enabled = false;
+        let db = Db::builder("/tmp/test_watch_l0", object_store)
+            .with_settings(options)
+            .build()
+            .await
+            .unwrap();
+        let mut watcher = db.subscribe();
+
+        // When: writing multiple keys and flushing the memtable to L0
+        db.put_with_options(
+            b"key1",
+            b"value1",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.put_with_options(
+            b"key2",
+            b"value2",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+            },
+        )
+        .await
+        .unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // Then: the watcher should report durable_seq >= 2
+        let status = tokio::time::timeout(
+            Duration::from_secs(10),
+            watcher.wait_for(|s| s.durable_seq >= 2),
+        )
+        .await
+        .expect("timed out waiting for seq update")
+        .expect("watch channel closed")
+        .clone();
+        assert!(
+            status.durable_seq >= 2,
+            "expected durable seq >= 2, got {}",
+            status.durable_seq
         );
 
         db.close().await.unwrap();
