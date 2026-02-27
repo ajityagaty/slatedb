@@ -200,8 +200,7 @@ pub(crate) async fn last_written_key_and_seq(
 
     // Sort descending so we get the last row from the last block, which
     // should be the last written key/seq.
-    let sst_version = table_store.read_sst_version(output_sst).await?;
-    let entry = match sst_version {
+    let entry = match output_sst.format_version {
         SST_FORMAT_VERSION => {
             let mut block_iter = BlockIterator::new(block, IterationOrder::Descending);
             block_iter.init().await?;
@@ -216,7 +215,7 @@ pub(crate) async fn last_written_key_and_seq(
             return Err(SlateDBError::InvalidVersion {
                 format_name: "SST",
                 supported_versions: vec![SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2],
-                actual_version: sst_version,
+                actual_version: output_sst.format_version,
             });
         }
     };
@@ -818,6 +817,7 @@ mod tests {
     use crate::clock::MonotonicClock;
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo};
     use crate::error::SlateDBError;
+    use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::sst_builder::BlockFormat;
     use crate::types::RowEntry;
     use crate::utils::{
@@ -865,7 +865,12 @@ mod tests {
             index_len: 1,
             ..Default::default()
         };
-        SsTableHandle::new_compacted(SsTableId::Compacted(Ulid::new()), info, None)
+        SsTableHandle::new_compacted(
+            SsTableId::Compacted(Ulid::new()),
+            SST_FORMAT_VERSION_LATEST,
+            info,
+            None,
+        )
     }
 
     #[test]
