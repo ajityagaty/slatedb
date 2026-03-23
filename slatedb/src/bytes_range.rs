@@ -43,23 +43,27 @@ impl RangeBounds<Bytes> for BytesRange {
     }
 }
 
-fn is_bound_non_empty(bound: &Bound<Bytes>) -> bool {
+fn is_empty_bound(bound: &Bound<Bytes>) -> bool {
+    matches!(bound, Included(b) | Excluded(b) if b.is_empty())
+}
+
+fn normalize_start_bound(bound: Bound<Bytes>) -> Bound<Bytes> {
+    // An empty byte string is the lexicographic minimum and is never a valid
+    // SlateDB key, so any range starting at b"" is equivalent to Unbounded.
     match bound {
-        Included(b) | Excluded(b) => !b.is_empty(),
-        Unbounded => true,
+        Included(b) | Excluded(b) if b.is_empty() => Unbounded,
+        other => other,
     }
 }
 
 impl BytesRange {
     pub(crate) fn new(start_bound: Bound<Bytes>, end_bound: Bound<Bytes>) -> Self {
-        assert!(
-            is_bound_non_empty(&start_bound),
-            "Start bound must be non-empty"
-        );
-        assert!(
-            is_bound_non_empty(&end_bound),
-            "End bound must be non-empty"
-        );
+        let start_bound = normalize_start_bound(start_bound);
+        // An empty byte string is the lexicographic minimum and is never a valid
+        // SlateDB key, so any range ending at b"" contains no valid keys.
+        if is_empty_bound(&end_bound) {
+            return Self::new_empty();
+        }
         let inner = ComparableRange::new(start_bound, end_bound);
         assert!(inner.non_empty(), "Range must be non-empty");
         Self { inner }
@@ -181,7 +185,7 @@ pub(crate) mod tests {
     use bytes::Bytes;
     use proptest::{prop_assert, proptest};
     use std::ops::Bound;
-    use std::ops::Bound::Unbounded;
+    use std::ops::Bound::{Excluded, Included, Unbounded};
     use std::ops::RangeBounds;
 
     #[test]
@@ -321,5 +325,37 @@ pub(crate) mod tests {
         let start = Bound::Included(Bytes::from("z"));
         let end = Bound::Included(Bytes::from("a"));
         BytesRange::new(start, end);
+    }
+
+    #[test]
+    fn test_included_empty_start_normalizes_to_unbounded() {
+        let range = BytesRange::new(Included(Bytes::new()), Included(Bytes::from("z")));
+        assert_eq!(range.start_bound(), Bound::Unbounded);
+        assert_eq!(range.end_bound(), Bound::Included(&Bytes::from("z")));
+    }
+
+    #[test]
+    fn test_excluded_empty_start_normalizes_to_unbounded() {
+        let range = BytesRange::new(Excluded(Bytes::new()), Included(Bytes::from("z")));
+        assert_eq!(range.start_bound(), Bound::Unbounded);
+        assert_eq!(range.end_bound(), Bound::Included(&Bytes::from("z")));
+    }
+
+    #[test]
+    fn test_included_empty_end_returns_empty_range() {
+        let range = BytesRange::new(Included(Bytes::from("a")), Included(Bytes::new()));
+        assert!(range.empty());
+    }
+
+    #[test]
+    fn test_excluded_empty_end_returns_empty_range() {
+        let range = BytesRange::new(Included(Bytes::from("a")), Excluded(Bytes::new()));
+        assert!(range.empty());
+    }
+
+    #[test]
+    fn test_unbounded_start_with_empty_end_returns_empty_range() {
+        let range = BytesRange::new(Unbounded, Excluded(Bytes::new()));
+        assert!(range.empty());
     }
 }
